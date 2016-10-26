@@ -246,10 +246,18 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 	defer func() {
-		if err != nil && ipamConf != nil && ipamConf.IP6 != nil {
-			req := ipam.IPAMReq{IP: &ipamConf.IP6.IP.IP}
-			if err = c.ReleaseIP(ipam.CNIIPAMType, req); err != nil {
-				log.Warningf("failed to release allocated IP of container ID %q: %s", args.ContainerID, err)
+		if err != nil && ipamConf != nil {
+			if ipamConf.IP6 != nil {
+				req := ipam.IPAMReq{IP: &ipamConf.IP4.IP.IP}
+				if err = c.ReleaseIP(ipam.CNIIPAMType, req); err != nil {
+					log.Warningf("failed to release allocated IPv6 of container ID %q: %s", args.ContainerID, err)
+				}
+			}
+			if ipamConf.IP4 != nil {
+				req := ipam.IPAMReq{IP: &ipamConf.IP4.IP.IP}
+				if err = c.ReleaseIP(ipam.CNIIPAMType, req); err != nil {
+					log.Warningf("failed to release allocated IPv4 of container ID %q: %s", args.ContainerID, err)
+				}
 			}
 		}
 	}()
@@ -280,35 +288,50 @@ func cmdDel(args *skel.CmdArgs) error {
 		return fmt.Errorf("error while starting cilium-client: %s", err)
 	}
 
-	var containerIP net.IP
-	// FIXME: We need to retrieve the IPv6 address somehow...
+	var containerIPv4, containerIPv6 net.IP
+	// FIXME: We need to retrieve the IP address somehow...
 	ns.WithNetNSPath(args.Netns, func(_ ns.NetNS) error {
 		l, err := netlink.LinkByName(args.IfName)
 		if err != nil {
 			return err
 		}
-		addrs, err := netlink.AddrList(l, netlink.FAMILY_V6)
+		v6addrs, err := netlink.AddrList(l, netlink.FAMILY_V6)
 		if err != nil {
 			return err
 		}
-		log.Debugf("IPv6 addresses found %+v\n", addrs)
+		log.Debugf("IPv6 addresses found %+v\n", v6addrs)
 
-		for _, addr := range addrs {
+		for _, addr := range v6addrs {
 			if uint8(addr.Scope) == uint8(netlink.SCOPE_UNIVERSE) {
-				containerIP = addr.IP
+				containerIPv6 = addr.IP
+				break
+			}
+		}
+
+		v4addrs, err := netlink.AddrList(l, netlink.FAMILY_V4)
+		if err != nil {
+			return err
+		}
+		log.Debugf("IPv4 addresses found %+v\n", v4addrs)
+
+		for _, addr := range v4addrs {
+			if uint8(addr.Scope) == uint8(netlink.SCOPE_UNIVERSE) {
+				containerIPv4 = addr.IP
 				break
 			}
 		}
 		return nil
 	})
 
-	req := ipam.IPAMReq{IP: &containerIP}
-	if err = c.ReleaseIP(ipam.CNIIPAMType, req); err != nil {
-		log.Warningf("failed to release allocated IP of container ID %q: %s", args.ContainerID, err)
+	if err = c.ReleaseIP(ipam.CNIIPAMType, ipam.IPAMReq{IP: &containerIPv6}); err != nil {
+		log.Warningf("failed to release allocated IPv6 of container ID %q: %s", args.ContainerID, err)
+	}
+	if err = c.ReleaseIP(ipam.CNIIPAMType, ipam.IPAMReq{IP: &containerIPv4}); err != nil {
+		log.Warningf("failed to release allocated IPv4 of container ID %q: %s", args.ContainerID, err)
 	}
 
 	var ep types.Endpoint
-	ep.IPv6 = addressing.DeriveCiliumIPv6(containerIP)
+	ep.IPv6 = addressing.DeriveCiliumIPv6(containerIPv6)
 	ep.SetID()
 	if err := c.EndpointLeave(ep.ID); err != nil {
 		log.Warningf("leaving the endpoint failed: %s\n", err)
